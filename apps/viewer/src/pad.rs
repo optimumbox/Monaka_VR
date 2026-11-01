@@ -108,7 +108,9 @@ pub fn default_bindings(profile: &str) -> Vec<(&'static str, String)> {
             v
         }
         "index_controller" => {
-            let mut v = sticks_triggers_grips("squeeze/value");
+            // The grip's force, not its value: the value rises with the fingers merely wrapped
+            // round the handle (capacitive), so a resting hand held the bumpers.
+            let mut v = sticks_triggers_grips("squeeze/force");
             v.extend([
                 b("pad_a", R, "a/click"),
                 b("pad_b", R, "b/click"),
