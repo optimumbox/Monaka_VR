@@ -22,6 +22,8 @@ use std::time::Instant;
 #[derive(Clone, Copy)]
 enum Control {
     Button(u16),
+    /// A button pressed by how hard the input is held ([`squeezed`]): a grip's force.
+    Squeeze(u16),
     LeftTrigger,
     RightTrigger,
     LeftStick,
@@ -40,8 +42,8 @@ const CONTROLS: [(&str, &str, Control); 21] = [
     ("pad_right_stick", "Right stick (look)", Control::RightStick),
     ("pad_left_trigger", "Left trigger", Control::LeftTrigger),
     ("pad_right_trigger", "Right trigger", Control::RightTrigger),
-    ("pad_left_bumper", "Left bumper", Control::Button(button::LEFT_SHOULDER)),
-    ("pad_right_bumper", "Right bumper", Control::Button(button::RIGHT_SHOULDER)),
+    ("pad_left_bumper", "Left bumper", Control::Squeeze(button::LEFT_SHOULDER)),
+    ("pad_right_bumper", "Right bumper", Control::Squeeze(button::RIGHT_SHOULDER)),
     ("pad_a", "A", Control::Button(button::A)),
     ("pad_b", "B", Control::Button(button::B)),
     ("pad_x", "X", Control::Button(button::X)),
@@ -109,7 +111,8 @@ pub fn default_bindings(profile: &str) -> Vec<(&'static str, String)> {
         }
         "index_controller" => {
             // The grip's force, not its value: the value rises with the fingers merely wrapped
-            // round the handle (capacitive), so a resting hand held the bumpers.
+            // round the handle (capacitive), so a resting hand held the bumpers. The force is
+            // read as a value ([`squeezed`]): bound to a button, SteamVR presses it at a light hold.
             let mut v = sticks_triggers_grips("squeeze/force");
             v.extend([
                 b("pad_a", R, "a/click"),
@@ -169,6 +172,18 @@ pub struct PadActions<'s> {
     actions: Vec<(&'static str, Control, Action<'s>)>,
     /// The proxy (which [`PadActions::set_proxy`] changes while VR runs), the layer and the latch.
     layers: Cell<Layers>,
+    /// The [`Control::Squeeze`] buttons held at the last read.
+    squeezed: Cell<u16>,
+}
+
+/// How hard a [`Control::Squeeze`] input must be held to press its button, and how little to let
+/// it go again (0..1).
+const SQUEEZE_PRESS: f32 = 0.5;
+const SQUEEZE_RELEASE: f32 = 0.25;
+
+/// Whether a squeeze button is held at `value`, having been held (`was`) or not.
+pub fn squeezed(was: bool, value: f32) -> bool {
+    if was { value > SQUEEZE_RELEASE } else { value >= SQUEEZE_PRESS }
 }
 
 impl<'s> PadActions<'s> {
@@ -179,12 +194,12 @@ impl<'s> PadActions<'s> {
         for (name, label, control) in CONTROLS {
             let action = match control {
                 Control::LeftStick | Control::RightStick => set.vector2_action(name, label)?,
-                Control::LeftTrigger | Control::RightTrigger => set.float_action(name, label)?,
+                Control::LeftTrigger | Control::RightTrigger | Control::Squeeze(_) => set.float_action(name, label)?,
                 Control::Button(_) | Control::Layer | Control::Shift | Control::Rest => set.boolean_action(name, label)?,
             };
             actions.push((name, control, action));
         }
-        Ok(Self { actions, layers: Cell::new(Layers::new(hold, proxy)) })
+        Ok(Self { actions, layers: Cell::new(Layers::new(hold, proxy)), squeezed: Cell::new(0) })
     }
 
     /// The d-pad directions held and the proxy of another game, from the next read (a game linked
@@ -210,6 +225,8 @@ impl<'s> PadActions<'s> {
     pub fn read(&self, session: &Session<'_>) -> Gamepad {
         let mut pad = Gamepad::default();
         let mut held = Held::default();
+        let was = self.squeezed.get();
+        let mut squeezed_now = 0;
         for (_, control, action) in &self.actions {
             match *control {
                 Control::Layer => held.layer = session.boolean(action).unwrap_or(false),
@@ -218,6 +235,11 @@ impl<'s> PadActions<'s> {
                 Control::Button(bit) => {
                     if session.boolean(action).unwrap_or(false) {
                         pad.buttons |= bit;
+                    }
+                }
+                Control::Squeeze(bit) => {
+                    if squeezed(was & bit != 0, session.float(action).unwrap_or(0.0)) {
+                        squeezed_now |= bit;
                     }
                 }
                 Control::LeftTrigger => pad.left_trigger = trigger(session.float(action).unwrap_or(0.0)),
@@ -233,6 +255,8 @@ impl<'s> PadActions<'s> {
                 }
             }
         }
+        self.squeezed.set(squeezed_now);
+        pad.buttons |= squeezed_now;
         let mut layers = self.layers.get();
         layers.apply(&mut pad, held, Instant::now());
         self.layers.set(layers);

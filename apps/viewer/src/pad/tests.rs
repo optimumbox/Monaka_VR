@@ -23,3 +23,13 @@ fn every_binding_names_a_control_and_a_known_profile_has_some() {
         }
     }
 }
+
+#[test]
+fn a_squeeze_presses_past_half_and_lets_go_below_a_quarter() {
+    assert!(!squeezed(false, 0.0));
+    assert!(!squeezed(false, 0.3));
+    assert!(squeezed(false, 0.5));
+    assert!(squeezed(true, 0.3));
+    assert!(!squeezed(true, 0.25));
+    assert!(squeezed(false, 1.0));
+}
