@@ -3,6 +3,8 @@
 //! that came late or early), and how far the compositor must turn each pair to the head (the
 //! angle between the pair's pose and the head's for this refresh): even turns from one refresh to
 //! the next are a smooth view, a jump between them is a stutter however well the pairs are drawn.
+//! The flat screen (menus, videos) is tallied apart ([`Flat`]): how many of its refreshes had a new
+//! image, the longest it went without one, and how old the images were as they came in.
 
 use std::time::{Duration, Instant};
 
@@ -22,7 +24,21 @@ pub struct Cadence {
     change_max: f32,
     /// The most the viewer's own work took in a refresh (from its frame wait to its hand-in).
     work_max: Duration,
+    flat: Flat,
     since: Instant,
+}
+
+/// The flat screen's refreshes since the last line.
+#[derive(Clone, Copy, Default)]
+struct Flat {
+    refreshes: u64,
+    /// Refreshes with a new image, and their ages at the read (ms from the publish).
+    new: u64,
+    age_sum: u64,
+    age_max: u64,
+    /// Refreshes in a row without a new image now, and the most.
+    stale: u32,
+    stale_max: u32,
 }
 
 /// The angle (degrees) between two unit quaternions (xyzw).
@@ -33,7 +49,7 @@ pub fn angle_between(a: [f32; 4], b: [f32; 4]) -> f32 {
 
 impl Cadence {
     pub fn new(now: Instant) -> Self {
-        Self { current: None, shown: 0, held: [0; 4], refreshes: 0, angle_sum: 0.0, angle_max: 0.0, last_angle: None, change_max: 0.0, work_max: Duration::ZERO, since: now }
+        Self { current: None, shown: 0, held: [0; 4], refreshes: 0, angle_sum: 0.0, angle_max: 0.0, last_angle: None, change_max: 0.0, work_max: Duration::ZERO, flat: Flat::default(), since: now }
     }
 
     /// Each refresh: the pair shown (its sequence and pose's orientation) and the head's for it;
@@ -63,8 +79,44 @@ impl Cadence {
             if let Some(line) = self.line() {
                 println!("{line}");
             }
+            if let Some(line) = self.flat_line() {
+                println!("{line}");
+            }
             *self = Self { current: self.current, shown: self.shown, ..Self::new(now) };
         }
+    }
+
+    /// A refresh of the flat screen: `arrived`, the age (ms) of a new image read for it, if one was.
+    pub fn flat(&mut self, arrived: Option<u64>) {
+        let f = &mut self.flat;
+        f.refreshes += 1;
+        match arrived {
+            Some(age) => {
+                f.new += 1;
+                f.age_sum += age;
+                f.age_max = f.age_max.max(age);
+                f.stale = 0;
+            }
+            None => {
+                f.stale += 1;
+                f.stale_max = f.stale_max.max(f.stale);
+            }
+        }
+    }
+
+    /// The flat screen's tally so far, if it was shown.
+    pub fn flat_line(&self) -> Option<String> {
+        let f = &self.flat;
+        (f.refreshes > 0).then(|| {
+            format!(
+                "Flat screen at the headset: {} refreshes, {} with a new image, at most {} in a row without one; the images {} ms old as read on average, at most {}",
+                f.refreshes,
+                f.new,
+                f.stale_max,
+                f.age_sum.checked_div(f.new).unwrap_or(0),
+                f.age_max
+            )
+        })
     }
 
     /// The viewer's own work this refresh took, from its frame wait to its hand-in.

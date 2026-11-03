@@ -1272,6 +1272,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                     }).map(|pair| (pair, None))
                 };
                 let arrived = read.is_some();
+                let arrived_age = read.as_ref().map(|(pair, _)| tick().saturating_sub(pair.tick));
                 meter.frame(now, read.as_ref().map(|(pair, _)| (pair.sequence, pair.tick)), tick());
                 if let Some((pair, _)) = &read {
                     ahead.pair(tick().saturating_sub(pair.tick));
@@ -1364,6 +1365,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                         layers.extend(hand_panels.layers(&local, &grip_poses, &aim_poses, last_head.as_ref(), args.panel_nearest));
                     }
                 } else {
+                    cadence.flat(arrived_age);
                     cadence.refresh(None, None, now);
                     let (space, quad_pose, width) = match &last_head {
                         Some(head) => {
