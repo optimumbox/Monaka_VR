@@ -170,6 +170,25 @@ pub fn premultiplied(device: &ID3D11Device, keep_alpha: bool) -> Result<ID3D11Bl
     state.ok_or_else(|| "no blend state".into())
 }
 
+/// No blending: the colour drawn replaces what is there; the target's alpha is kept.
+pub fn opaque(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
+        BlendEnable: false.into(),
+        SrcBlend: D3D11_BLEND_ONE,
+        DestBlend: D3D11_BLEND_ZERO,
+        BlendOp: D3D11_BLEND_OP_ADD,
+        SrcBlendAlpha: D3D11_BLEND_ONE,
+        DestBlendAlpha: D3D11_BLEND_ZERO,
+        BlendOpAlpha: D3D11_BLEND_OP_ADD,
+        RenderTargetWriteMask: (D3D11_COLOR_WRITE_ENABLE_RED.0 | D3D11_COLOR_WRITE_ENABLE_GREEN.0 | D3D11_COLOR_WRITE_ENABLE_BLUE.0) as u8,
+    };
+    let mut state = None;
+    // SAFETY: valid descriptor and out-pointer.
+    unsafe { device.CreateBlendState(&desc, Some(&mut state)) }.map_err(failed("blend state"))?;
+    state.ok_or_else(|| "no blend state".into())
+}
+
 /// Solid triangles, both faces, no depth clipping beyond the near plane the shaders handle.
 pub fn rasterizer(device: &ID3D11Device, scissor: bool) -> Result<ID3D11RasterizerState> {
     let desc = D3D11_RASTERIZER_DESC { FillMode: D3D11_FILL_SOLID, CullMode: D3D11_CULL_NONE, DepthClipEnable: true.into(), ScissorEnable: scissor.into(), ..Default::default() };

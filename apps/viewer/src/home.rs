@@ -20,7 +20,7 @@ use monaka_overlay::frost::FrostPass;
 use monaka_overlay::home::pages::Pages;
 use monaka_overlay::home::place::Ring;
 use monaka_overlay::home::{Home, PAGES};
-use monaka_overlay::quad::Rectangle;
+use monaka_overlay::quad::{QuadPass, Rectangle};
 use std::path::Path;
 use std::time::Instant;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
@@ -61,6 +61,9 @@ pub struct HomeView<'s> {
     /// The game blurred behind the panels while they are frosted, made at the first need; `Err`
     /// once it failed (the panels are solid for the rest of the run).
     frost: Option<Result<FrostPass, ()>>,
+    /// The panels drawn into the eye images, made at the first need; `Err` once it failed (they
+    /// are layers of their own for the rest of the run).
+    quad: Option<Result<QuadPass, ()>>,
 }
 
 impl<'s> HomeView<'s> {
@@ -80,6 +83,7 @@ impl<'s> HomeView<'s> {
             open_soon: false,
             recenter: false,
             frost: None,
+            quad: None,
         }
     }
 
@@ -105,6 +109,27 @@ impl<'s> HomeView<'s> {
             self.frost = Some(Err(()));
             self.home.set_frosted(false);
         }
+    }
+
+    /// Draws the open panels into eye `image` (made in `format`, seen as `eye`), so the headset
+    /// shows them with the eye's image every refresh: SteamVR shows a layer of its own as an
+    /// overlay, whose new images it takes only now and then. False when they could not be drawn
+    /// (their layers show them).
+    pub fn draw_eye(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, image: &ID3D11Texture2D, format: DXGI_FORMAT, eye: &EyeView) -> bool {
+        if !self.open {
+            return true;
+        }
+        let made = self.quad.get_or_insert_with(|| QuadPass::new(device).map_err(|e| println!("Home panels in the eye images: {e}; as layers this run")));
+        let Ok(pass) = made else { return false };
+        for page in 0..PAGES.len() {
+            let (Some(rectangle), Some(picture)) = (self.ring.rectangle(page), self.ring.picture(page)) else { continue };
+            if let Err(e) = pass.draw(device, context, image, format, eye, picture, &rectangle) {
+                println!("Home panels in the eye images: {e}; as layers this run");
+                self.quad = Some(Err(()));
+                return false;
+            }
+        }
+        true
     }
 
     pub fn is_open(&self) -> bool {

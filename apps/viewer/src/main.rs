@@ -784,6 +784,17 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
     let mut reticles = [None, None];
     // The home's viewer makes both: a game linked later says which it shows.
     let reticles_made = if args.home { [true; 2] } else { args.reticles };
+    // What hangs in front of the eyes (the flat screen, the home's panels, the HUD panels on the
+    // hands, the reticles) is drawn into the eye images: SteamVR shows a quad layer as an overlay,
+    // whose new images it takes only now and then (a slideshow). The layers are kept for when
+    // this cannot be done.
+    let mut eye_quads = monaka_overlay::quad::QuadPass::new(&device).map_err(|e| println!("Panels in the eye images: {e}; as layers this run")).ok();
+    let mut reticle_picture = None;
+    if reticles_made.contains(&true) {
+        let mut desc = simple_texture_desc(RETICLE_PIXELS, RETICLE_PIXELS, DXGI_FORMAT(format as i32));
+        desc.BindFlags = windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE.0 as u32;
+        reticle_picture = d3d::create_texture_with(&device, &desc, &reticle_image(RETICLE_PIXELS)).ok();
+    }
     if reticles_made.contains(&true) {
         let image = d3d::create_texture_with(&device, &simple_texture_desc(RETICLE_PIXELS, RETICLE_PIXELS, DXGI_FORMAT(format as i32)), &reticle_image(RETICLE_PIXELS))?;
         for (reticle, _) in reticles.iter_mut().zip(reticles_made).filter(|(_, on)| *on) {
@@ -816,7 +827,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 swapchain.fill(|target| d3d::copy_texture(&context, target, &dark))?;
             }
             d3d::flush(&context);
-            Some(made)
+            Some((made, dark))
         }
         _ => None,
     };
@@ -1243,6 +1254,10 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
             }
         }
         let mut layers = Vec::new();
+        // The flat screen (menus, videos) drawn into the backdrop's eye images: where it hangs and
+        // each eye's image. Whether the home's panels went into the eye images.
+        let mut flat_screen: Option<(monaka_overlay::quad::Rectangle, [windows::Win32::Graphics::Direct3D11::ID3D11Texture2D; 2])> = None;
+        let mut home_in_eyes = false;
         // Where the tunnel goes among the layers: over the game in 3D, under what hangs in front.
         let mut tunnel_at: Option<usize> = None;
         if frame.should_render {
@@ -1303,6 +1318,22 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 let game = debug_views.game();
                 let content = monaka_overlay::panels::Content { stats: meter.view(now, game), console: console_feed.view(now), fake_vr: &monaka_overlay::fake_vr::FakeVr::HEADSET };
                 debug_views.show_in_headset(&session, &device, &context, &content, now);
+                // In play, the reticles and the HUD panels on the hands go into the game's eye images.
+                let mut held: Vec<(monaka_overlay::quad::Rectangle, windows::Win32::Graphics::Direct3D11::ID3D11Texture2D)> = Vec::new();
+                if rendered.is_some() && eye_quads.is_some() {
+                    for (side, (reticle, aimed)) in reticles.iter().zip(aiming).enumerate() {
+                        let (Some(_), Some((hand, grip)), Some(head), Some(picture)) = (reticle, aimed, &last_head, &reticle_picture) else { continue };
+                        let palm = if grip.valid != 0 { grip.position } else { hand.position };
+                        let said = reticle_aims.as_mut().and_then(|r| r.read(side, RETICLE_SAID_MS));
+                        let position = math::reticle_point(head.position, hand.orientation, palm, args.reticle_palm, said);
+                        held.push((monaka_overlay::quad::Rectangle { orientation: hand.orientation, position, size: [RETICLE_SIZE, RETICLE_SIZE] }, picture.clone()));
+                    }
+                    if controllers.is_some() {
+                        held.extend(hand_panels.pictures(&grip_poses, &aim_poses, last_head.as_ref(), args.panel_nearest));
+                    }
+                }
+                let held_in_eyes = rendered.is_some() && eye_quads.is_some();
+                let mut home_drawn = [false; 2];
                 for (eye, (swapchain, source)) in swapchains.iter().zip(sources.iter()).enumerate() {
                     let filled = swapchain.fill(|image| {
                         d3d::copy_texture(&context, image, source);
@@ -1310,6 +1341,15 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                         if let Some(e) = rendered.as_ref().map(|pair| &pair.eyes[eye]) {
                             let seen_as = monaka_overlay::eye::EyeView { orientation: e.orientation, position: math::eye_position(e, eye), fov: e.fov[eye] };
                             home.frost_eye(&device, &context, image, *eye_format, source, &seen_as);
+                            if let Some(pass) = eye_quads.as_mut() {
+                                for (rectangle, picture) in &held {
+                                    if let Err(e) = pass.draw(&device, &context, image, *eye_format, &seen_as, picture, rectangle) {
+                                        println!("Panels in the eye images: {e}");
+                                        break;
+                                    }
+                                }
+                            }
+                            home_drawn[eye] = home.draw_eye(&device, &context, image, *eye_format, &seen_as);
                         }
                         debug_views.draw_eye(&device, &context, image, eye, rendered.as_ref(), *seen, eyes, pair_depth.as_ref().zip(input.depth_textures()));
                     });
@@ -1345,11 +1385,12 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                     };
                     layers.push(Layer::Projection { space: &local, views: [view(0), view(1)] });
                     stats.projected += 1;
+                    home_in_eyes = home_drawn == [true; 2];
                     tunnel_at = Some(layers.len());
                     cadence.refresh(Some((*seen, pair.eyes[0].orientation)), last_head.as_ref().map(|h| h.orientation), now);
                     // In play, where the game's aim ray goes: from the head along the controller, or
                     // where a weapon in the palm points.
-                    for (side, (reticle, aimed)) in reticles.iter().zip(aiming).enumerate() {
+                    for (side, (reticle, aimed)) in reticles.iter().zip(aiming).enumerate().filter(|_| !held_in_eyes) {
                         let (Some(swapchain), Some((hand, grip)), Some(head)) = (reticle, aimed, &last_head) else { continue };
                         let palm = if grip.valid != 0 { grip.position } else { hand.position };
                         let said = reticle_aims.as_mut().and_then(|r| r.read(side, RETICLE_SAID_MS));
@@ -1361,7 +1402,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                             size: Extent2Df { width: RETICLE_SIZE, height: RETICLE_SIZE },
                         });
                     }
-                    if controllers.is_some() {
+                    if controllers.is_some() && !held_in_eyes {
                         layers.extend(hand_panels.layers(&local, &grip_poses, &aim_poses, last_head.as_ref(), args.panel_nearest));
                     }
                 } else {
@@ -1377,9 +1418,15 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                         }
                         None => (&view_space, Posef::new(math::IDENTITY, [0.0, 0.0, -SCREEN_DISTANCE]), 4.0),
                     };
-                    for (eye, swapchain) in swapchains.iter().enumerate() {
-                        let size = Extent2Df { width, height: width * *image_aspect };
-                        layers.push(Layer::Quad { space, eye, swapchain, pose: quad_pose, size });
+                    let size = [width, width * *image_aspect];
+                    if last_head.is_some() && backdrop.is_some() && backdrop_views.is_some() && eye_quads.is_some() {
+                        // Drawn into the backdrop's eye images below.
+                        let rectangle = monaka_overlay::quad::Rectangle { orientation: quad_pose.orientation.xyzw(), position: quad_pose.position.xyz(), size };
+                        flat_screen = Some((rectangle, sources.clone()));
+                    } else {
+                        for (eye, swapchain) in swapchains.iter().enumerate() {
+                            layers.push(Layer::Quad { space, eye, swapchain, pose: quad_pose, size: Extent2Df { width: size[0], height: size[1] } });
+                        }
                     }
                 }
                 stats.visible += 1;
@@ -1403,11 +1450,36 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
             layers.insert(at, layer);
         }
         let projected = layers.iter().any(|layer| matches!(layer, Layer::Projection { .. }));
-        if let (true, Some(chains), Some(views)) = (frame.should_render && !projected, &backdrop, &backdrop_views) {
+        if let (true, Some((chains, dark)), Some(views)) = (frame.should_render && !projected, &backdrop, &backdrop_views) {
+            // Dark, then the flat screen and the home's panels, every refresh, as the eyes see now.
+            let mut drawn = [false; 2];
+            if eye_quads.is_some() {
+                for (eye, chain) in chains.iter().enumerate() {
+                    let seen_as = monaka_overlay::eye::EyeView { orientation: views[eye].pose.orientation.xyzw(), position: views[eye].pose.position.xyz(), fov: fov_angles(views[eye].fov) };
+                    let filled = chain.fill(|image| {
+                        d3d::copy_texture(&context, image, dark);
+                        if let (Some((rectangle, pictures)), Some(pass)) = (&flat_screen, eye_quads.as_mut())
+                            && let Err(e) = pass.draw_opaque(&device, &context, image, DXGI_FORMAT(format as i32), &seen_as, &pictures[eye], rectangle)
+                        {
+                            println!("The flat screen in the eye images: {e}");
+                        }
+                        drawn[eye] = home.draw_eye(&device, &context, image, DXGI_FORMAT(format as i32), &seen_as);
+                    });
+                    if let Err(e) = filled {
+                        println!("The backdrop could not be drawn ({e}); panels as layers this run");
+                        eye_quads = None;
+                        drawn = [false; 2];
+                        break;
+                    }
+                }
+            }
+            home_in_eyes = drawn == [true; 2];
             let view = |eye: usize| ProjectionView { pose: views[eye].pose, fov: views[eye].fov, swapchain: &chains[eye], depth: None };
             layers.insert(0, Layer::Projection { space: &local, views: [view(0), view(1)] });
         }
-        layers.extend(home.layers(&local));
+        if !home_in_eyes {
+            layers.extend(home.layers(&local));
+        }
         // One flush for every swapchain filled this frame, so the compositor finds them all done.
         d3d::flush(&context);
         cadence.work(woke.elapsed());

@@ -10,6 +10,7 @@ cbuffer Quad : register(b0) {
     float4 view2;
     float4 tangents;  // the image edges: left, right, up, down
     float4 corners[4];  // top left, top right, bottom left, bottom right (tracking space)
+    uint4 mode;         // x: 0 the values go out as read, 1 encoded to sRGB, 2 decoded to linear
 };
 
 struct Out {
@@ -34,6 +35,24 @@ Out vs_main(uint vertex : SV_VertexID) {
     return o;
 }
 
+float3 to_srgb(float3 c) {
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(abs(c), 1.0 / 2.4) - 0.055;
+}
+
+float3 to_linear(float3 c) {
+    return c <= 0.04045 ? c / 12.92 : pow((abs(c) + 0.055) / 1.055, 2.4);
+}
+
+// Four taps over the pixel's footprint: a picture drawn smaller than its pixels (a hand panel, the
+// flat screen) does not shimmer.
 float4 ps_main(Out i) : SV_Target {
-    return picture.Sample(smooth, i.uv);
+    float2 dx = ddx(i.uv) * 0.25;
+    float2 dy = ddy(i.uv) * 0.25;
+    float4 c = 0.25 * (picture.Sample(smooth, i.uv + dx + dy) + picture.Sample(smooth, i.uv + dx - dy) + picture.Sample(smooth, i.uv - dx + dy) + picture.Sample(smooth, i.uv - dx - dy));
+    // Premultiplied: the colour as it would be unmultiplied is what is encoded.
+    if (mode.x != 0 && c.a > 0) {
+        float3 plain = c.rgb / c.a;
+        c.rgb = (mode.x == 1 ? to_srgb(plain) : to_linear(plain)) * c.a;
+    }
+    return c;
 }

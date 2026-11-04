@@ -13,6 +13,7 @@ use monaka_core::math::{Quat, Vec3, add, conjugate, from_axes, multiply, rotate,
 use monaka_contract::protocol::{HandPose, HeadPose};
 use monaka_contract::protocol::RIGHT_HAND;
 use monaka_openxr::{Extent2Df, Layer, Posef, Session, Space, Swapchain};
+use monaka_overlay::quad::Rectangle;
 use std::cell::Cell;
 use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_SHADER_RESOURCE, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
@@ -103,6 +104,19 @@ impl<'s> HandPanels<'s> {
 
     /// Each panel on its hand ([`HandPanel::layer`]), a panel beside another placed by the main
     /// panel of its hand and side (the first there not beside one).
+    /// Where each panel with an image is (tracking space) and its image, to draw into the eye
+    /// images ([`HandPanels::layers`] as rectangles).
+    pub fn pictures(&self, grips: &[HandPose; 2], aims: &[HandPose; 2], head: Option<&HeadPose>, nearest: f32) -> Vec<(Rectangle, ID3D11Texture2D)> {
+        self.panels
+            .iter()
+            .filter_map(|panel| {
+                let main = self.panels.iter().find(|p| !p.place.beside && p.place.hand == panel.place.hand && p.place.side == panel.place.side);
+                let (orientation, position, size) = panel.placed(grips, aims, head, nearest, main.map_or(0.0, |m| m.shown_size().0))?;
+                Some((Rectangle { orientation, position, size }, panel.texture.clone()?))
+            })
+            .collect()
+    }
+
     pub fn layers<'a>(&'a self, local: &'a Space<'a>, grips: &[HandPose; 2], aims: &[HandPose; 2], head: Option<&HeadPose>, nearest: f32) -> impl Iterator<Item = Layer<'a>> + 'a {
         let (grips, aims) = (*grips, *aims);
         let head = head.copied();
@@ -229,6 +243,14 @@ impl<'s> HandPanel<'s> {
     /// the palm (the grip's place, the aim pose's turn: as a game holds a gun, its barrel along
     /// the aim), so it sits along the gun and tips with it; the others by the grip.
     pub fn layer<'a>(&'a self, local: &'a Space<'a>, grips: &[HandPose; 2], aims: &[HandPose; 2], head: Option<&HeadPose>, nearest: f32, main_width: f32) -> Option<Layer<'a>> {
+        let swapchain = self.swapchain.as_ref()?;
+        let (orientation, position, [width, height]) = self.placed(grips, aims, head, nearest, main_width)?;
+        Some(Layer::Overlay { space: local, swapchain, pose: Posef::new(orientation, position), size: Extent2Df { width, height } })
+    }
+
+    /// Where the panel is this frame (tracking space) and how big, once it has an image and its
+    /// hand is tracked.
+    fn placed(&self, grips: &[HandPose; 2], aims: &[HandPose; 2], head: Option<&HeadPose>, nearest: f32, main_width: f32) -> Option<(Quat, Vec3, [f32; 2])> {
         let grip = &grips[self.place.hand];
         let aim = Some(aims[self.place.hand]).filter(|a| a.valid != 0);
         let grip = &match self.place.side {
@@ -239,7 +261,7 @@ impl<'s> HandPanel<'s> {
             self.no_grip.set(self.no_grip.get() + 1);
             return None;
         }
-        let Some(swapchain) = self.swapchain.as_ref().filter(|_| self.seen != 0) else {
+        let Some(_) = self.swapchain.as_ref().filter(|_| self.seen != 0) else {
             self.no_image.set(self.no_image.get() + 1);
             return None;
         };
@@ -276,7 +298,7 @@ impl<'s> HandPanel<'s> {
                 position = add(head.position, [line[0] * scale, line[1] * scale, line[2] * scale]);
             }
         }
-        Some(Layer::Overlay { space: local, swapchain, pose: Posef::new(orientation, position), size: Extent2Df { width: width * scale, height: height * scale } })
+        Some((orientation, position, [width * scale, height * scale]))
     }
 }
 

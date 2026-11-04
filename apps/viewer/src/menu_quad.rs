@@ -27,6 +27,8 @@ pub struct MenuQuad<'s> {
     format: DXGI_FORMAT,
     pixels: [u32; 2],
     swapchain: Option<Swapchain<'s>>,
+    /// The image last drawn (its own canvas's, which stays until drawn again), for eye images.
+    picture: Option<ID3D11Texture2D>,
     failed: bool,
     /// Where it floats (tracking space).
     pub anchor: Posef,
@@ -35,7 +37,7 @@ pub struct MenuQuad<'s> {
 impl<'s> MenuQuad<'s> {
     /// The quad of menu `name`, `pixels` in `format`, a metre straight ahead until it opens.
     pub fn new(name: &'static str, format: DXGI_FORMAT, pixels: [u32; 2]) -> Self {
-        Self { name, format, pixels, swapchain: None, failed: false, anchor: Posef::new(math::IDENTITY, [0.0, 0.0, -DISTANCE]) }
+        Self { name, format, pixels, swapchain: None, picture: None, failed: false, anchor: Posef::new(math::IDENTITY, [0.0, 0.0, -DISTANCE]) }
     }
 
     /// Hands the menu's image to the headset, `draw`n when it shows something new (its argument:
@@ -56,6 +58,7 @@ impl<'s> MenuQuad<'s> {
             Ok(None) => return,
             Err(e) => return self.fail(e),
         };
+        self.picture = Some(image.clone());
         if let Some(swapchain) = &self.swapchain
             && let Err(e) = swapchain.fill(|target| {
                 d3d::copy_texture(context, target, &image);
@@ -68,6 +71,11 @@ impl<'s> MenuQuad<'s> {
     /// Its swapchain, once made and while nothing failed.
     pub fn swapchain(&self) -> Option<&Swapchain<'s>> {
         self.swapchain.as_ref().filter(|_| !self.failed)
+    }
+
+    /// Its image as last drawn, while nothing failed.
+    pub fn picture(&self) -> Option<&ID3D11Texture2D> {
+        self.picture.as_ref().filter(|_| !self.failed)
     }
 
     pub fn fail(&mut self, why: String) {

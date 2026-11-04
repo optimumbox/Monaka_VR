@@ -38,6 +38,7 @@ struct QuadConstants {
     view: [[f32; 4]; 3],
     tangents: [f32; 4],
     corners: [[f32; 4]; 4],
+    mode: [u32; 4],
 }
 
 pub struct QuadPass {
@@ -46,6 +47,7 @@ pub struct QuadPass {
     constants: Constants<QuadConstants>,
     sampler: ID3D11SamplerState,
     blend: ID3D11BlendState,
+    opaque: ID3D11BlendState,
     rasterizer: ID3D11RasterizerState,
     targets: Targets,
 }
@@ -69,6 +71,7 @@ impl QuadPass {
             constants: Constants::new(device)?,
             sampler: sampler.ok_or("no quad sampler")?,
             blend: gpu::premultiplied(device, true)?,
+            opaque: gpu::opaque(device)?,
             rasterizer: gpu::rasterizer(device, false)?,
             targets: Targets::default(),
         })
@@ -78,13 +81,31 @@ impl QuadPass {
     /// alpha is kept.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, image: &ID3D11Texture2D, format: DXGI_FORMAT, eye: &EyeView, picture: &ID3D11Texture2D, rectangle: &Rectangle) -> Result<()> {
+        self.draw_with(device, context, image, format, eye, picture, rectangle, false)
+    }
+
+    /// As [`QuadPass::draw`], the picture's alpha ignored: it covers what is there (a flat screen).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_opaque(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, image: &ID3D11Texture2D, format: DXGI_FORMAT, eye: &EyeView, picture: &ID3D11Texture2D, rectangle: &Rectangle) -> Result<()> {
+        self.draw_with(device, context, image, format, eye, picture, rectangle, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_with(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, image: &ID3D11Texture2D, format: DXGI_FORMAT, eye: &EyeView, picture: &ID3D11Texture2D, rectangle: &Rectangle, opaque: bool) -> Result<()> {
         let desc = monaka_channel::d3d::texture_desc(image);
         let target = self.targets.view(device, image, format)?;
+        let read_linear = is_srgb(monaka_channel::d3d::texture_desc(picture).Format);
+        let write_linear = self.targets.format_of(image).is_some_and(is_srgb);
+        let mode = match (read_linear, write_linear) {
+            (true, false) => 1,
+            (false, true) => 2,
+            _ => 0,
+        };
         let mut view = None;
         // SAFETY: a view of a live texture with shader-resource binding, in its own format.
         unsafe { device.CreateShaderResourceView(picture, None, Some(&mut view)) }.map_err(failed("quad picture view"))?;
         let corners = rectangle.corners().map(|[x, y, z]| [x, y, z, 1.0]);
-        self.constants.write(context, &QuadConstants { view: eye.view_rows(), tangents: eye.tangents(), corners });
+        self.constants.write(context, &QuadConstants { view: eye.view_rows(), tangents: eye.tangents(), corners, mode: [mode, 0, 0, 0] });
         gpu::bind_target(context, &target, desc.Width, desc.Height);
         // SAFETY: our own live shaders, views and states, bound for one draw on the viewer's
         // immediate context, which nothing else draws with; the view is unbound after.
@@ -97,7 +118,7 @@ impl QuadPass {
             context.PSSetShaderResources(0, Some(&[view]));
             context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
             context.RSSetState(&self.rasterizer);
-            context.OMSetBlendState(&self.blend, None, u32::MAX);
+            context.OMSetBlendState(if opaque { &self.opaque } else { &self.blend }, None, u32::MAX);
             context.OMSetDepthStencilState(None, 0);
             context.Draw(6, 0);
             context.PSSetShaderResources(0, Some(&[None]));
@@ -105,6 +126,11 @@ impl QuadPass {
         gpu::unbind_target(context);
         Ok(())
     }
+}
+
+fn is_srgb(format: DXGI_FORMAT) -> bool {
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
+    matches!(format, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
 }
 
 #[cfg(test)]

@@ -186,6 +186,12 @@ impl<'s> RingView<'s> {
         Some(Layer::Overlay { space, swapchain: quad.swapchain()?, pose: quad.anchor, size: Extent2Df { width: place::WIDTH, height: place::height() } })
     }
 
+    /// Panel `page`'s image as last drawn, once the ring stands somewhere.
+    pub fn picture(&self, page: usize) -> Option<&ID3D11Texture2D> {
+        self.ring?;
+        self.quads.get(page)?.picture()
+    }
+
     /// Where panel `page` floats (tracking space), for captures with the drawings on them.
     pub fn rectangle(&self, page: usize) -> Option<Rectangle> {
         self.ring?;
