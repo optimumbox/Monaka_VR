@@ -56,6 +56,7 @@ mod pointer;
 mod recorder;
 mod ring;
 mod smooth;
+mod steamvr_timing;
 mod tunnel;
 mod view_commands;
 
@@ -881,6 +882,8 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
     let mut last_head: Option<HeadPose> = None;
     // How the pairs meet the headset's refreshes, said every 10 s.
     let mut cadence = cadence::Cadence::new(Instant::now());
+    // SteamVR's own account of each frame (why it reprojected, its times), said every 10 s.
+    let mut steamvr_timing = steamvr_timing::Reader::open();
     let depth_layer = instance.depth_layer();
     println!("Live stereo; update cadence set by the producer. Ctrl+C exits.");
 
@@ -932,6 +935,9 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
         let frame = session.wait_frame()?;
         let woke = Instant::now();
         let woke_ns = monaka_channel::pose::now_ns();
+        if let Some(reader) = steamvr_timing.as_mut() {
+            reader.poll(woke);
+        }
         note_display_period(frame.display_period);
         // The headset's refresh for the game: when this wait returned, and how long a frame is.
         if let Some(poses) = link.as_mut().and_then(|l| l.poses.as_mut())
