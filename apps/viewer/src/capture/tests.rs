@@ -8,7 +8,7 @@ fn a_capture_image_is_a_jpeg_and_a_warped_one_gets_its_sources() {
     // A gradient, the right half from the eye's own last frame (alpha in the 128-212 band).
     let texels: Vec<u8> = (0..width * height).flat_map(|i| [(i % width * 4) as u8, (i / width * 8) as u8, 90, if i % width < width / 2 { 255 } else { 170 }]).collect();
     let path = folder.join("pair-1-left.jpg");
-    write_jpeg(&path, width, height, dxgi_format::R8G8B8A8_UNORM, &texels);
+    write_jpeg(&path, width, height, dxgi_format::R8G8B8A8_UNORM, &texels, true);
     for name in ["pair-1-left.jpg", "pair-1-left-sources.jpg"] {
         let bytes = std::fs::read(folder.join(name)).unwrap();
         assert_eq!(&bytes[..2], &[0xff, 0xd8], "{name} starts as a JPEG");

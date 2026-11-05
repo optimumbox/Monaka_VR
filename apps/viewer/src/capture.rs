@@ -9,11 +9,20 @@
 //!
 //! The first pair also goes into one image, the eyes side by side ([`BOTH`]), and that file onto
 //! the clipboard ([`crate::clipboard`]), ready to paste.
+//!
+//! What the chord was pressed for (a flicker, a frame gone wrong) is often past by then: the last
+//! [`HISTORY`] pairs before it are kept all along at half size each way ([`History`]: copied and
+//! halved on the GPU as they arrive), and written too, `before-K-left.jpg` the pair K frames before
+//! the chord.
 
 use monaka_channel::d3d::{self, create_texture, read_image};
 use monaka_contract::protocol::{RenderedPair, dxgi_format};
 use std::path::{Path, PathBuf};
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11DeviceContext,
+    ID3D11ShaderResourceView, ID3D11Texture2D,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
 
 /// Pairs per capture.
 pub const PAIRS: usize = 6;
@@ -21,6 +30,96 @@ pub const PAIRS: usize = 6;
 const JPEG_QUALITY: u8 = 92;
 /// The first pair side by side, left eye first: the image put on the clipboard.
 const BOTH: &str = "pair-1-both.jpg";
+/// Pairs kept from before a capture is asked for (a second of the headset's), at half size.
+pub const HISTORY: usize = 90;
+/// The most of the GPU's memory the kept pairs take (fewer kept of larger eyes).
+const HISTORY_BYTES: u64 = 1 << 30;
+
+/// The last pairs as they arrived, halved: each eye copied into a texture with a second mip, the
+/// mip made, and copied into the ring. Its textures are made as it fills, two a frame.
+struct History {
+    /// The eyes' width, height and format it was made for.
+    source: (u32, u32, DXGI_FORMAT),
+    halvers: Vec<(ID3D11Texture2D, ID3D11ShaderResourceView)>,
+    half: D3D11_TEXTURE2D_DESC,
+    ring: Vec<[ID3D11Texture2D; 2]>,
+    sequences: Vec<u64>,
+    slots: usize,
+    pushed: usize,
+}
+
+impl History {
+    /// One for eyes like `eye`; None for a format the GPU cannot halve.
+    fn new(device: &ID3D11Device, eye: &ID3D11Texture2D) -> Option<Self> {
+        let desc = d3d::texture_desc(eye);
+        let format = typed(desc.Format);
+        if !d3d::makes_mips(device, format) || desc.Width < 2 || desc.Height < 2 {
+            return None;
+        }
+        let halver = D3D11_TEXTURE2D_DESC {
+            Width: desc.Width,
+            Height: desc.Height,
+            MipLevels: 2,
+            ArraySize: 1,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32,
+        };
+        let mut halvers = Vec::new();
+        for _ in 0..2 {
+            let texture = create_texture(device, &halver).ok()?;
+            let view = d3d::shader_view(device, &texture).ok()?;
+            halvers.push((texture, view));
+        }
+        let half = D3D11_TEXTURE2D_DESC { BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32, ..d3d::simple_texture_desc(desc.Width / 2, desc.Height / 2, format) };
+        let pair_bytes = u64::from(half.Width) * u64::from(half.Height) * 4 * 2;
+        let slots = HISTORY.min((HISTORY_BYTES / pair_bytes.max(1)) as usize).max(1);
+        Some(Self { source: (desc.Width, desc.Height, desc.Format), halvers, half, ring: Vec::new(), sequences: Vec::new(), slots, pushed: 0 })
+    }
+
+    fn fits(&self, eye: &ID3D11Texture2D) -> bool {
+        let desc = d3d::texture_desc(eye);
+        self.source == (desc.Width, desc.Height, desc.Format)
+    }
+
+    /// Keeps the pair halved, over the oldest once full.
+    fn keep(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, eyes: [&ID3D11Texture2D; 2], sequence: u64) {
+        let slot = self.pushed % self.slots;
+        if slot == self.ring.len() {
+            let (Ok(left), Ok(right)) = (create_texture(device, &self.half), create_texture(device, &self.half)) else { return };
+            self.ring.push([left, right]);
+            self.sequences.push(0);
+        }
+        for (e, eye) in eyes.into_iter().enumerate() {
+            let (halver, view) = &self.halvers[e];
+            // The halver is the eye's size, the ring's textures its second mip's.
+            d3d::copy_subresource(context, halver, 0, eye, 0);
+            d3d::make_mips(context, view);
+            d3d::copy_subresource(context, &self.ring[slot][e], 0, halver, 1);
+        }
+        self.sequences[slot] = sequence;
+        self.pushed += 1;
+    }
+
+    /// The kept pairs' slots, oldest first.
+    fn order(&self) -> Vec<usize> {
+        let kept = self.pushed.min(self.ring.len());
+        (0..kept).map(|i| (self.pushed - kept + i) % self.slots).collect()
+    }
+}
+
+/// A typeless format's plain one (the eyes may be shared typeless): the halver's views need one.
+fn typed(format: DXGI_FORMAT) -> DXGI_FORMAT {
+    match format.0 {
+        27 => DXGI_FORMAT(28),
+        90 => DXGI_FORMAT(87),
+        23 => DXGI_FORMAT(24),
+        other => DXGI_FORMAT(other),
+    }
+}
 
 struct Kept {
     eyes: [ID3D11Texture2D; 2],
@@ -38,6 +137,11 @@ pub struct Capture {
     /// The first pair's images as read back (width, height, format, texels), left first.
     first: Vec<(u32, u32, u32, Vec<u8>)>,
     lines: Vec<String>,
+    /// The pairs before ([`History`]; none until the first pair, nor for eyes it cannot halve),
+    /// and, while a capture is under way, its kept slots, oldest first.
+    history: Option<History>,
+    history_failed: bool,
+    before: Vec<usize>,
 }
 
 /// Asks `capture` (none without a folder) for a capture of the next pairs, saying why when it
@@ -60,7 +164,7 @@ pub fn start(capture: Option<&mut Capture>) -> bool {
 impl Capture {
     /// Captures go into `folder` (made when the first is asked for).
     pub fn new(folder: PathBuf) -> Self {
-        Self { folder, current: None, kept: Vec::new(), read: 0, first: Vec::new(), lines: Vec::new() }
+        Self { folder, current: None, kept: Vec::new(), read: 0, first: Vec::new(), lines: Vec::new(), history: None, history_failed: false, before: Vec::new() }
     }
 
     /// Asks for a capture of the next pairs; false while one is still under way.
@@ -75,13 +179,21 @@ impl Capture {
             return false;
         }
         println!("Capture: the next {PAIRS} pairs to {}", folder.display());
-        self.lines = vec![format!("{PAIRS} consecutive pairs as the headset showed them (left, right); pose records as the producer sent them")];
+        self.before = self.history.as_ref().map(History::order).unwrap_or_default();
+        self.lines = vec![format!(
+            "{PAIRS} consecutive pairs as the headset showed them (left, right); pose records as the producer sent them; before them the {} pairs before the chord at half size (before-K: K frames before)",
+            self.before.len()
+        )];
         self.current = Some((folder, PAIRS));
         true
     }
 
     /// A pair arrived (`eyes` hold it now): kept while a capture wants it.
     pub fn arrived(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, eyes: [&ID3D11Texture2D; 2], sequence: u64, record: Option<&RenderedPair>) {
+        if self.current.is_none() {
+            self.remember(device, context, eyes, sequence);
+            return;
+        }
         let Some((_, wanted)) = self.current.as_mut().filter(|(_, wanted)| *wanted > 0) else { return };
         let copy = |eye: &ID3D11Texture2D| -> Option<ID3D11Texture2D> {
             let copy = create_texture(device, &d3d::private_copy_desc(&d3d::texture_desc(eye))).ok()?;
@@ -97,13 +209,32 @@ impl Capture {
         *wanted -= 1;
     }
 
+    /// Between captures: the pair kept halved ([`History`]).
+    fn remember(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, eyes: [&ID3D11Texture2D; 2], sequence: u64) {
+        if self.history_failed {
+            return;
+        }
+        if !self.history.as_ref().is_some_and(|h| h.fits(eyes[0]) && h.fits(eyes[1])) {
+            self.history = History::new(device, eyes[0]).filter(|h| h.fits(eyes[1]));
+            if self.history.is_none() {
+                self.history_failed = true;
+                println!("Capture: the pairs before a capture cannot be kept (the eyes' format)");
+                return;
+            }
+        }
+        if let Some(history) = self.history.as_mut() {
+            history.keep(device, context, eyes, sequence);
+        }
+    }
+
     /// Once a capture's pairs are all kept: reads one image back and hands it to a writer thread.
     pub fn step(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext) {
         let Some((folder, 0)) = self.current.clone() else { return };
-        let Some(pair) = self.kept.get(self.read / 2) else {
-            self.finish(&folder);
+        if self.read >= self.kept.len() * 2 {
+            self.step_before(device, context, &folder);
             return;
-        };
+        }
+        let Some(pair) = self.kept.get(self.read / 2) else { return };
         let (index, eye) = (self.read / 2, self.read % 2);
         if eye == 0 {
             self.lines.push(format!("pair {} (sequence {}): {}", index + 1, pair.sequence, describe(pair.record.as_ref())));
@@ -120,9 +251,32 @@ impl Capture {
                         std::thread::spawn(move || copy_both(&both, &eyes));
                     }
                 }
-                std::thread::spawn(move || write_jpeg(&path, width, height, format, &texels));
+                std::thread::spawn(move || write_jpeg(&path, width, height, format, &texels, true));
             }
             Err(e) => println!("Capture: pair {} {} unreadable: {e}", index + 1, ["left", "right"][eye]),
+        }
+        self.read += 1;
+    }
+
+    /// After the capture's own pairs: one of the pairs before read back and written.
+    fn step_before(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, folder: &Path) {
+        let i = self.read - self.kept.len() * 2;
+        let (Some(&slot), Some(history)) = (self.before.get(i / 2), self.history.as_ref()) else {
+            self.finish(folder);
+            return;
+        };
+        let (k, eye) = (self.before.len() - i / 2, i % 2);
+        if eye == 0 {
+            self.lines.push(format!("before {k} (sequence {}), half size", history.sequences[slot]));
+        }
+        let texture = &history.ring[slot][eye];
+        let format = d3d::texture_desc(texture).Format.0 as u32;
+        match read_image(device, context, texture) {
+            Ok((width, height, texels)) => {
+                let path = folder.join(format!("before-{k:02}-{}.jpg", ["left", "right"][eye]));
+                std::thread::spawn(move || write_jpeg(&path, width, height, format, &texels, false));
+            }
+            Err(e) => println!("Capture: the pair {k} before, {} unreadable: {e}", ["left", "right"][eye]),
         }
         self.read += 1;
     }
@@ -133,6 +287,11 @@ impl Capture {
         (self.current, self.read) = (None, 0);
         self.kept.clear();
         self.first.clear();
+        self.before.clear();
+        if let Some(history) = self.history.as_mut() {
+            // The pairs before the next capture begin after this one.
+            history.pushed = 0;
+        }
     }
 }
 
@@ -148,9 +307,10 @@ fn describe(record: Option<&RenderedPair>) -> String {
 
 /// The texels as an RGB JPEG (the sRGB formats are stored as their plain ones). A warped eye's
 /// alpha says where each pixel came from (`monaka_warp`'s `reproject.hlsl`): such an image also
-/// gets `<name>-sources.jpg`, the real eye's pixels as they are, its own last frame's tinted green,
-/// a neighbour's copy solid blue, nothing solid magenta.
-fn write_jpeg(path: &Path, width: u32, height: u32, format: u32, texels: &[u8]) {
+/// gets `<name>-sources.jpg` (when `sources`; a halved eye's alpha is blended), the real eye's
+/// pixels as they are, its own last frame's tinted green, a neighbour's copy solid blue, nothing
+/// solid magenta.
+fn write_jpeg(path: &Path, width: u32, height: u32, format: u32, texels: &[u8], sources: bool) {
     let Some(pixels) = rgba(format, texels) else {
         println!("Capture: {} not written (image format {format})", path.display());
         return;
@@ -161,7 +321,7 @@ fn write_jpeg(path: &Path, width: u32, height: u32, format: u32, texels: &[u8]) 
         }
     };
     save(path, pixels.iter().flat_map(|[r, g, b, _]| [*r, *g, *b]).collect());
-    if pixels.iter().all(|p| p[3] == 255) {
+    if !sources || pixels.iter().all(|p| p[3] == 255) {
         return;
     }
     let sources = pixels
