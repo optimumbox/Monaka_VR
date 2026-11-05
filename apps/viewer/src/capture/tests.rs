@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn the_eyes_report_gives_the_right_eye_from_the_left_in_the_left_eyes_frame() {
+    let fov = [-0.9, 0.8, 0.85, -0.85];
+    // Head turned 90 degrees left (about y): the left eye's x axis is the room's -z.
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let q = [0.0, s, 0.0, s];
+    let left = HeadsetEye { orientation: q, position: [0.0, 1.6, 0.0], fov };
+    let right = HeadsetEye { orientation: q, position: [0.0, 1.601, -0.063], fov };
+    let report = eyes_report(&[left, right], None, 2560);
+    assert!(report.contains("x 63.00 mm, y 1.00 mm, z 0.00 mm"), "{report}");
+    assert!(report.contains("yaw 0.000"), "{report}");
+    assert!(report.contains("0.5 m: "), "{report}");
+}
+
+#[test]
 fn a_capture_image_is_a_jpeg_and_a_warped_one_gets_its_sources() {
     let folder = std::env::temp_dir().join(format!("monaka-capture-test-{}", std::process::id()));
     std::fs::create_dir_all(&folder).unwrap();

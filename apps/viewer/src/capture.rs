@@ -134,8 +134,21 @@ struct Kept {
     record: Option<RenderedPair>,
 }
 
+/// One eye as the headset itself places it (OpenXR's located view): orientation xyzw, position in
+/// metres, field of view (left, right, up, down; radians).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadsetEye {
+    pub orientation: [f32; 4],
+    pub position: [f32; 3],
+    pub fov: [f32; 4],
+}
+
 pub struct Capture {
     folder: PathBuf,
+    /// The headset's own views of the eyes, the latest located ([`Capture::headset_views`]).
+    headset: Option<[HeadsetEye; 2]>,
+    /// The capture's first pair: its pose record and eye width, for `eyes.txt`.
+    told: Option<(Option<RenderedPair>, u32)>,
     /// The capture under way: its folder, and the pairs still to keep.
     current: Option<(PathBuf, usize)>,
     kept: Vec<Kept>,
@@ -171,7 +184,12 @@ pub fn start(capture: Option<&mut Capture>) -> bool {
 impl Capture {
     /// Captures go into `folder` (made when the first is asked for).
     pub fn new(folder: PathBuf) -> Self {
-        Self { folder, current: None, kept: Vec::new(), read: 0, first: Vec::new(), lines: Vec::new(), history: None, history_failed: !history_wanted(), before: Vec::new() }
+        Self { folder, headset: None, told: None, current: None, kept: Vec::new(), read: 0, first: Vec::new(), lines: Vec::new(), history: None, history_failed: !history_wanted(), before: Vec::new() }
+    }
+
+    /// The headset's own views of the eyes this frame, written beside each capture (`eyes.txt`).
+    pub fn headset_views(&mut self, eyes: [HeadsetEye; 2]) {
+        self.headset = Some(eyes);
     }
 
     /// Asks for a capture of the next pairs; false while one is still under way.
@@ -252,6 +270,7 @@ impl Capture {
             Ok((width, height, texels)) => {
                 let path = folder.join(format!("pair-{}-{}.jpg", index + 1, ["left", "right"][eye]));
                 if index == 0 {
+                    self.told = Some((pair.record, width));
                     self.first.push((width, height, format, texels.clone()));
                     if self.first.len() == 2 {
                         let (eyes, both) = (std::mem::take(&mut self.first), folder.join(BOTH));
@@ -290,6 +309,10 @@ impl Capture {
 
     fn finish(&mut self, folder: &Path) {
         let _ = std::fs::write(folder.join("pairs.txt"), self.lines.join("\n") + "\n");
+        if let Some(headset) = self.headset.as_ref() {
+            let (record, width) = self.told.take().unwrap_or((None, 0));
+            let _ = std::fs::write(folder.join("eyes.txt"), eyes_report(headset, record.as_ref().map(|r| &r.eyes[0]), width));
+        }
         println!("Capture saved: {}", folder.display());
         (self.current, self.read) = (None, 0);
         self.kept.clear();
@@ -302,14 +325,97 @@ impl Capture {
     }
 }
 
-/// A pair's pose record in a line: each eye's position and orientation, or why there is none.
+/// A pair's pose record in a line: each eye's head position and orientation, eye distance and
+/// field of view, or why there is none.
 fn describe(record: Option<&RenderedPair>) -> String {
     let Some(record) = record else { return "no pose record (a flat screen)".into() };
     let eye = |e: usize| {
         let p = &record.eyes[e];
-        format!("position {:?} orientation {:?}", p.position, p.orientation)
+        format!("position {:?} orientation {:?} ipd {:.2} mm fov {:?}", p.position, p.orientation, p.ipd * 1000.0, p.fov[e])
     };
     format!("left {}; right {}", eye(0), eye(1))
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+/// `v` turned by the unit quaternion `q` (xyzw).
+fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let u = [q[0], q[1], q[2]];
+    let t = cross(u, v).map(|c| 2.0 * c);
+    let c = cross(u, t);
+    [v[0] + q[3] * t[0] + c[0], v[1] + q[3] * t[1] + c[1], v[2] + q[3] * t[2] + c[2]]
+}
+
+fn conjugate(q: [f32; 4]) -> [f32; 4] {
+    [-q[0], -q[1], -q[2], q[3]]
+}
+
+/// Where the headset puts the eyes, and what of it the game is not told (`eyes.txt`).
+///
+/// The game draws both eyes facing the left eye's way (`told`'s orientation), the right eye its
+/// IPD along that frame's x axis; each image is shown by the compositor as drawn from that pose.
+/// So a turn between the headset's eyes (canting) is carried by the compositor; what is lost is the
+/// right eye sitting higher, lower, further forward or back than the left: a near thing then sits
+/// at another height in each eye. The report gives the right eye from the left in the left eye's
+/// frame (x right, y up, z back), the turn between them, and the pixels the untold offsets move a
+/// thing at 0.5 m, 1 m and 3 m (`width`: the eye image's width, square eyes).
+pub fn eyes_report(headset: &[HeadsetEye; 2], told: Option<&monaka_contract::protocol::HeadPose>, width: u32) -> String {
+    let [left, right] = headset;
+    let back = conjugate(left.orientation);
+    let apart = rotate(back, [right.position[0] - left.position[0], right.position[1] - left.position[1], right.position[2] - left.position[2]]);
+    let mm = apart.map(|a| (a * 100_000.0).round() / 100.0 + 0.0);
+    let turn = {
+        let r = right.orientation;
+        let q = back;
+        // q * r (the right eye's orientation in the left eye's frame).
+        [
+            q[3] * r[0] + q[0] * r[3] + q[1] * r[2] - q[2] * r[1],
+            q[3] * r[1] - q[0] * r[2] + q[1] * r[3] + q[2] * r[0],
+            q[3] * r[2] + q[0] * r[1] - q[1] * r[0] + q[2] * r[3],
+            q[3] * r[3] - q[0] * r[0] - q[1] * r[1] - q[2] * r[2],
+        ]
+    };
+    let forward = rotate(turn, [0.0, 0.0, -1.0]);
+    let up = rotate(turn, [0.0, 1.0, 0.0]);
+    let yaw = (-forward[0]).atan2(-forward[2]).to_degrees();
+    let pitch = forward[1].clamp(-1.0, 1.0).asin().to_degrees();
+    let roll = (-up[0]).atan2(up[1]).to_degrees();
+    let [yaw, pitch, roll] = [yaw, pitch, roll].map(|a| (a * 1000.0).round() / 1000.0 + 0.0);
+    let deg = |f: [f32; 4]| f.map(|a| (a.to_degrees() * 100.0).round() / 100.0);
+    let mut lines = vec![
+        "The eyes as the headset places them (its own views at the capture), against what the game is told.".to_string(),
+        format!("left eye field of view (left, right, up, down; degrees) {:?}", deg(left.fov)),
+        format!("right eye field of view {:?}", deg(right.fov)),
+        format!("right eye from the left, in the left eye's frame (x right, y up, z back): x {:.2} mm, y {:.2} mm, z {:.2} mm (apart {:.2} mm)", mm[0], mm[1], mm[2], (mm[0] * mm[0] + mm[1] * mm[1] + mm[2] * mm[2]).sqrt()),
+        format!("right eye turned from the left: yaw {yaw:.3} (left +), pitch {pitch:.3} (up +), roll {roll:.3} degrees: carried by the compositor"),
+    ];
+    if let Some(told) = told {
+        lines.push(format!(
+            "the game is told: both eyes facing the left eye's way, {:.2} mm apart along its x axis; fields of view {:?} and {:?}",
+            told.ipd * 1000.0,
+            deg(told.fov[0]),
+            deg(told.fov[1])
+        ));
+        for (eye, name) in [(0, "left"), (1, "right")] {
+            if told.fov[eye] != headset[eye].fov {
+                lines.push(format!("the {name} eye's field of view told differs from the headset's"));
+            }
+        }
+    }
+    if width > 0 {
+        let fov = right.fov;
+        let per_tangent_x = width as f32 / (fov[1].tan() - fov[0].tan());
+        let per_tangent_y = width as f32 / (fov[2].tan() - fov[3].tan());
+        let at = |d: f32| (mm[1] / 1000.0 / d * per_tangent_y, mm[2] / 1000.0 / d * per_tangent_x);
+        let shown: Vec<String> = [0.5f32, 1.0, 3.0].iter().map(|&d| {
+            let (v, z) = at(d);
+            format!("{d} m: {v:.1} px vertically, depth offset ~{z:.1} px")
+        }).collect();
+        lines.push(format!("not told (the right eye's height and depth from the left), in the right eye's {width}-pixel image: {}", shown.join("; ")));
+    }
+    lines.join("\n") + "\n"
 }
 
 /// The texels as an RGB JPEG (the sRGB formats are stored as their plain ones). A warped eye's

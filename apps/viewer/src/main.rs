@@ -976,6 +976,10 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
             backdrop_views = Some(located);
             let positions = [located[0].pose.position.xyz(), located[1].pose.position.xyz()];
             let fov = [fov_angles(located[0].fov), fov_angles(located[1].fov)];
+            if let Some(capture) = capture.as_mut() {
+                let eye = |e: usize| capture::HeadsetEye { orientation: located[e].pose.orientation.xyzw(), position: positions[e], fov: fov[e] };
+                capture.headset_views([eye(0), eye(1)]);
+            }
             let mut head = math::head_from_views(located[0].pose.orientation.xyzw(), positions, fov);
             let gaze_readable = |source: &gaze::Source<'_>| synced || matches!(source, gaze::Source::Tracker(_));
             if let Some(source) = gaze_source.as_ref().filter(|s| gaze_readable(s))
