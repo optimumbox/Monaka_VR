@@ -40,6 +40,10 @@ const RELEASES: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases");
 /// SteamVR's Steam app id.
 const STEAMVR_APP: u32 = 250820;
 /// Checks SteamVR and the game this often.
+/// The window redraws for new log lines and session events at most this often: during play the
+/// lines can come hundreds a second (a stuttering headset's), and a redraw for each took GPU time
+/// from the headset.
+const LINES_REPAINT: Duration = Duration::from_millis(250);
 const CHECK_EVERY: Duration = Duration::from_millis(1500);
 /// The details log is cut to its newest half past this many bytes.
 const DETAILS_MAX: usize = 200_000;
@@ -410,7 +414,7 @@ impl App {
         std::thread::spawn(move || {
             session::run(game, &values, &paths, Console::Hidden, shows, linked, &session_stop, &mut |event| {
                 let _ = send_event.send(event);
-                ctx.request_repaint();
+                ctx.request_repaint_after(LINES_REPAINT);
             });
         });
         self.running = Some(Running { stop, events, game: game.id, to_headset });
@@ -428,7 +432,7 @@ impl App {
     /// again later.
     fn open_headset(&mut self) {
         let ctx = self.ctx.clone();
-        match Headset::start(&self.paths, Console::Hidden, move || ctx.request_repaint()) {
+        match Headset::start(&self.paths, Console::Hidden, move || ctx.request_repaint_after(LINES_REPAINT)) {
             Ok(headset) => {
                 self.headset = Some(headset);
                 self.headset_failed = None;

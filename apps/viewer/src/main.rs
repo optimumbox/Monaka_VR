@@ -126,21 +126,47 @@ enum Live {
     Tunnel,
 }
 
-/// The viewer's part in live option `id`, if it has one.
-/// The headset's frame period last said (nanoseconds).
-static SAID_PERIOD: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// The headset's frame period last said (nanoseconds), and the one seen now with when it was
+/// first seen, waiting to settle.
+static SAID_PERIOD: std::sync::Mutex<(i64, Option<(i64, Instant)>)> = std::sync::Mutex::new((0, None));
+/// How long a new frame period must hold before it is said.
+const PERIOD_SETTLES: Duration = Duration::from_secs(2);
 
 /// Says the headset's frame period (`period`, nanoseconds) when it first shows and whenever it
-/// changes by more than a tenth of a millisecond: a game's frame rate that does not divide it
-/// evenly shows a frame twice, or skips one, every so often.
+/// changes by more than a tenth of a millisecond and holds for [`PERIOD_SETTLES`]: a game's frame
+/// rate that does not divide it evenly shows a frame twice, or skips one, every so often. While
+/// frames slip, SteamVR's period flips every few frames; said each time, the lines flooded the
+/// launcher's window, which redraws on each one and took GPU time from the headset.
 fn note_display_period(period: i64) {
-    let said = SAID_PERIOD.load(std::sync::atomic::Ordering::Relaxed);
-    if period > 0 && (period - said).abs() > 100_000 {
-        SAID_PERIOD.store(period, std::sync::atomic::Ordering::Relaxed);
-        println!("The headset shows a frame every {:.2} ms ({:.1} Hz)", period as f64 / 1e6, 1e9 / period as f64);
+    if period <= 0 {
+        return;
     }
+    let mut state = SAID_PERIOD.lock().unwrap_or_else(|e| e.into_inner());
+    let (said, waiting) = &mut *state;
+    if (period - *said).abs() <= 100_000 {
+        *waiting = None;
+        return;
+    }
+    let now = Instant::now();
+    match waiting {
+        Some((seen, since)) if (period - *seen).abs() <= 100_000 => {
+            if *said != 0 && now.duration_since(*since) < PERIOD_SETTLES {
+                return;
+            }
+        }
+        _ => {
+            *waiting = Some((period, now));
+            if *said != 0 {
+                return;
+            }
+        }
+    }
+    *said = period;
+    *waiting = None;
+    println!("The headset shows a frame every {:.2} ms ({:.1} Hz)", period as f64 / 1e6, 1e9 / period as f64);
 }
 
+/// The viewer's part in live option `id`, if it has one.
 fn live_setting(id: &str) -> Option<Live> {
     use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, FROSTED_PANELS, MENU_REACH_DEPTH, TUNNEL_VISION, menu_reach};
     [
