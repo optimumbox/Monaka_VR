@@ -11,9 +11,11 @@
 //! the clipboard ([`crate::clipboard`]), ready to paste.
 //!
 //! What the chord was pressed for (a flicker, a frame gone wrong) is often past by then: the last
-//! [`HISTORY`] pairs before it are kept all along at half size each way ([`History`]: copied and
-//! halved on the GPU as they arrive), and written too, `before-K-left.jpg` the pair K frames before
-//! the chord.
+//! [`HISTORY`] pairs before it can be kept all along at half size each way ([`History`]: copied
+//! and halved on the GPU as they arrive), and written too, `before-K-left.jpg` the pair K frames
+//! before the chord. Only with `MONAKA_CAPTURE_HISTORY` set: kept all along it cost the viewer's GPU
+//! time enough to drop the game's frames (a run of it: the viewer's GPU 0.5 ms to 10 ms, 540 of the
+//! game's 900 frames shown).
 
 use monaka_channel::d3d::{self, create_texture, read_image};
 use monaka_contract::protocol::{RenderedPair, dxgi_format};
@@ -32,6 +34,11 @@ const JPEG_QUALITY: u8 = 92;
 const BOTH: &str = "pair-1-both.jpg";
 /// Pairs kept from before a capture is asked for (a second of the headset's), at half size.
 pub const HISTORY: usize = 90;
+/// Whether the pairs before a capture are kept (`MONAKA_CAPTURE_HISTORY` set).
+fn history_wanted() -> bool {
+    std::env::var_os("MONAKA_CAPTURE_HISTORY").is_some()
+}
+
 /// The most of the GPU's memory the kept pairs take (fewer kept of larger eyes).
 const HISTORY_BYTES: u64 = 1 << 30;
 
@@ -164,7 +171,7 @@ pub fn start(capture: Option<&mut Capture>) -> bool {
 impl Capture {
     /// Captures go into `folder` (made when the first is asked for).
     pub fn new(folder: PathBuf) -> Self {
-        Self { folder, current: None, kept: Vec::new(), read: 0, first: Vec::new(), lines: Vec::new(), history: None, history_failed: false, before: Vec::new() }
+        Self { folder, current: None, kept: Vec::new(), read: 0, first: Vec::new(), lines: Vec::new(), history: None, history_failed: !history_wanted(), before: Vec::new() }
     }
 
     /// Asks for a capture of the next pairs; false while one is still under way.
