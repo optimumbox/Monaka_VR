@@ -276,7 +276,8 @@ fn play(
         return Err((*why).to_owned());
     }
 
-    let eye = match crate::games::eye_size(values, game) {
+    // The size settled before supersampling (the headset's asked once), and after it.
+    let settled = match crate::games::eye_size(values, game) {
         EyeSize::GameOwn => None,
         EyeSize::Fixed(w, h) => Some((w, h)),
         // The 2D window: no headset to ask, so the game keeps its own resolution.
@@ -290,6 +291,10 @@ fn play(
             size
         }),
     };
+    let eye = crate::games::supersampled(values, game, settled);
+    if let (Some((w, h)), true) = (eye, eye != settled) {
+        report(Event::Info(format!("Supersampled eye size {w}x{h}")));
+    }
 
     report(Event::Info(match openxr {
         Some(_) => "VR is starting. Forward follows the headset: use its own recentre control.".into(),
@@ -298,7 +303,7 @@ fn play(
     let mut quick_failures = 0;
     while system::alive(pid) && !stop.requested() {
         let started = Instant::now();
-        let ended = one_run(game, values, paths, viewer, &producer, openxr, linked, pid, eye, console, stop, report);
+        let ended = one_run(game, values, paths, viewer, &producer, openxr, linked, pid, eye, settled, console, stop, report);
         if stop.requested() || !system::alive(pid) {
             if let Err(RunEnd::Fatal(why) | RunEnd::Retry(why)) = ended {
                 report(Event::Warning(why));
@@ -437,6 +442,8 @@ fn one_run(
     linked: Option<&Linked>,
     pid: u32,
     eye: Option<(u32, u32)>,
+    // The eye size before supersampling.
+    settled: Option<(u32, u32)>,
     console: Console,
     stop: &Stop,
     report: &mut dyn FnMut(Event),
@@ -550,11 +557,12 @@ fn one_run(
         let mut apply = |values: &Values| -> Result<(), String> {
             // The eye size settled again from the values changed: the headset's own as the headset
             // view knows it (a run's own viewer keeps the size it has).
-            eye = match crate::games::eye_size(values, game) {
+            let base = match crate::games::eye_size(values, game) {
                 EyeSize::GameOwn => None,
                 EyeSize::Fixed(w, h) => Some((w, h)),
-                EyeSize::Headset => linked.and_then(Linked::eye_size).or(eye),
+                EyeSize::Headset => linked.and_then(Linked::eye_size).or(settled),
             };
+            eye = crate::games::supersampled(values, game, base);
             let plan = crate::games::plan(values, game, eye);
             for (name, contents) in &plan.files {
                 std::fs::write(folder.join(name), contents).map_err(|e| format!("cannot write {name}: {e}"))?;

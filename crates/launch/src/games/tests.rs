@@ -188,3 +188,16 @@ fn local_builds_come_from_the_dev_list_and_packs_from_the_games_folder() {
     assert!(packed.games.len() == 1 && packed.games[0].removable() && packed.games[0].licence_folder(&paths) == pack_dir);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn supersampling_makes_the_eye_that_many_times_its_pixels() {
+    const SUPERSAMPLED: Manifest = Manifest { options: &[RENDER_SIZE, SUPERSAMPLING], ..GAME };
+    let eye = Some((2560, 2560));
+    assert_eq!(supersampled(&values_of(&SUPERSAMPLED, &[]), &SUPERSAMPLED, eye), eye);
+    assert_eq!(supersampled(&values_of(&SUPERSAMPLED, &["supersampling=4"]), &SUPERSAMPLED, eye), Some((5120, 5120)));
+    assert_eq!(supersampled(&values_of(&SUPERSAMPLED, &["supersampling=2"]), &SUPERSAMPLED, eye), Some((3620, 3620)));
+    assert_eq!(supersampled(&values_of(&SUPERSAMPLED, &["supersampling=8"]), &SUPERSAMPLED, Some((2064, 2208))), Some((5838, 6246)));
+    assert_eq!(supersampled(&values_of(&SUPERSAMPLED, &["supersampling=3"]), &SUPERSAMPLED, None), None);
+    // A game without the option keeps its size.
+    assert_eq!(supersampled(&Values::default(), &GAME, eye), eye);
+}

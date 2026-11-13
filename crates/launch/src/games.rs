@@ -256,6 +256,25 @@ pub fn eye_size(values: &Values, game: &Manifest) -> EyeSize {
     }
 }
 
+/// The largest side an eye is made by supersampling.
+const SUPERSAMPLED_SIDE: f64 = 8192.0;
+
+/// `eye` made `supersampling` times its pixels: each side by the factor's square root, rounded to
+/// an even size (none: none; the game without the option, or 1: as it is).
+pub fn supersampled(values: &Values, game: &Manifest, eye: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    let eye = eye?;
+    if game.option("supersampling").is_none() {
+        return Some(eye);
+    }
+    let factor = values.number(game, "supersampling");
+    if !factor.is_finite() || factor <= 1.0 {
+        return Some(eye);
+    }
+    let side = factor.min(8.0).sqrt();
+    let scale = |n: u32| ((f64::from(n) * side).min(SUPERSAMPLED_SIDE) / 2.0).round() as u32 * 2;
+    Some((scale(eye.0), scale(eye.1)))
+}
+
 /// What a run of `game` with `values` writes and runs: the options file from the manifest (a
 /// switch whose needs are not met written off, with why), the eye size the launcher settled, the
 /// folders of files other games bring, the licences, the viewer's arguments and the notes.
